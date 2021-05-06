@@ -7,8 +7,9 @@ import (
 	"log"
 	"time"
 
-	"github.com/automuteus/galactus/broker"
+	"github.com/automuteus/utils/pkg/capture"
 	"github.com/automuteus/utils/pkg/game"
+	"github.com/automuteus/utils/pkg/settings"
 	"github.com/bwmarrin/discordgo"
 	"github.com/nicksnyder/go-i18n/v2/i18n"
 )
@@ -61,7 +62,7 @@ func StatsFromGameAndEvents(pgame *PostgresGame, events []*PostgresGameEvent) Ga
 	}
 
 	for _, v := range events {
-		if v.EventType == int16(broker.State) {
+		if v.EventType == int16(capture.State) {
 			if v.Payload == DiscussCode {
 				stats.NumMeetings++
 				stats.Events = append(stats.Events, SimpleEvent{
@@ -76,7 +77,7 @@ func StatsFromGameAndEvents(pgame *PostgresGame, events []*PostgresGameEvent) Ga
 					Data:            "",
 				})
 			}
-		} else if v.EventType == int16(broker.Player) {
+		} else if v.EventType == int16(capture.Player) {
 			player := game.Player{}
 			err := json.Unmarshal([]byte(v.Payload), &player)
 			if err != nil {
@@ -102,7 +103,7 @@ func StatsFromGameAndEvents(pgame *PostgresGame, events []*PostgresGameEvent) Ga
 	return stats
 }
 
-func (stats *GameStatistics) ToDiscordEmbed(combinedID string, sett *GuildSettings) *discordgo.MessageEmbed {
+func (stats *GameStatistics) ToDiscordEmbed(combinedID string, sett *settings.GuildSettings) *discordgo.MessageEmbed {
 
 	title := sett.LocalizeMessage(&i18n.Message{
 		ID:    "responses.matchStatsEmbed.Title",

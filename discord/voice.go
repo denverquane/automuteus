@@ -1,11 +1,10 @@
 package discord
 
 import (
-	"context"
-	"github.com/automuteus/utils/pkg/task"
-	"github.com/bsm/redislock"
-	"github.com/bwmarrin/discordgo"
-	"github.com/denverquane/amongusdiscord/storage"
+	galactus_client "github.com/automuteus/galactus/pkg/client"
+	"github.com/automuteus/utils/pkg/discord"
+	"github.com/automuteus/utils/pkg/premium"
+	"github.com/automuteus/utils/pkg/settings"
 	"log"
 	"strconv"
 	"time"
@@ -21,11 +20,15 @@ const (
 
 func (bot *Bot) applyToSingle(dgs *GameState, userID string, mute, deaf bool) {
 	log.Println("Forcibly applying mute/deaf to " + userID)
-	prem, _ := bot.PostgresInterface.GetGuildPremiumStatus(dgs.GuildID)
+	premTier := premium.FreeTier
+	premiumRecord, err := bot.GalactusClient.GetGuildPremium(dgs.GuildID)
+	if err == nil && !premium.IsExpired(premiumRecord.Tier, premiumRecord.Days) {
+		premTier = premiumRecord.Tier
+	}
 	uid, _ := strconv.ParseUint(userID, 10, 64)
-	req := task.UserModifyRequest{
-		Premium: prem,
-		Users: []task.UserModify{
+	req := discord.UserModifyRequest{
+		Premium: premTier,
+		Users: []discord.UserModify{
 			{
 				UserID: uid,
 				Mute:   mute,
@@ -34,29 +37,27 @@ func (bot *Bot) applyToSingle(dgs *GameState, userID string, mute, deaf bool) {
 		},
 	}
 	// nil lock because this is an override; we don't care about legitimately obtaining the lock
-	mdsc := bot.GalactusClient.ModifyUsers(dgs.GuildID, dgs.ConnectCode, req, nil)
+	mdsc := bot.GalactusClient.ModifyUsers(dgs.GuildID, dgs.ConnectCode, req)
 	if mdsc == nil {
 		log.Println("Nil response from modifyUsers, probably not good...")
-	} else {
-		go RecordDiscordRequestsByCounts(bot.RedisInterface.client, mdsc)
 	}
 }
 
 func (bot *Bot) applyToAll(dgs *GameState, mute, deaf bool) {
-	g, err := bot.PrimarySession.State.Guild(dgs.GuildID)
+	g, err := bot.GalactusClient.GetGuild(dgs.GuildID)
 	if err != nil {
 		log.Println(err)
 		return
 	}
 
-	users := []task.UserModify{}
+	users := []discord.UserModify{}
 
 	for _, voiceState := range g.VoiceStates {
 		userData, err := dgs.GetUser(voiceState.UserID)
 		if err != nil {
 			// the User doesn't exist in our userdata cache; add them
 			added := false
-			userData, added = dgs.checkCacheAndAddUser(g, bot.PrimarySession, voiceState.UserID)
+			userData, added = dgs.checkCacheAndAddUser(g, bot.GalactusClient, voiceState.UserID)
 			if !added {
 				continue
 			}
@@ -70,7 +71,7 @@ func (bot *Bot) applyToAll(dgs *GameState, mute, deaf bool) {
 
 		if tracked {
 			uid, _ := strconv.ParseUint(userData.User.UserID, 10, 64)
-			users = append(users, task.UserModify{
+			users = append(users, discord.UserModify{
 				UserID: uid,
 				Mute:   mute,
 				Deaf:   deaf,
@@ -79,37 +80,38 @@ func (bot *Bot) applyToAll(dgs *GameState, mute, deaf bool) {
 		}
 	}
 	if len(users) > 0 {
-		prem, _ := bot.PostgresInterface.GetGuildPremiumStatus(dgs.GuildID)
-		req := task.UserModifyRequest{
-			Premium: prem,
+		premTier := premium.FreeTier
+		premiumRecord, err := bot.GalactusClient.GetGuildPremium(dgs.GuildID)
+		if err == nil && !premium.IsExpired(premiumRecord.Tier, premiumRecord.Days) {
+			premTier = premiumRecord.Tier
+		}
+		req := discord.UserModifyRequest{
+			Premium: premTier,
 			Users:   users,
 		}
-		// nil lock because this is an override; we don't care about legitimately obtaining the lock
-		mdsc := bot.GalactusClient.ModifyUsers(dgs.GuildID, dgs.ConnectCode, req, nil)
+
+		mdsc := bot.GalactusClient.ModifyUsers(dgs.GuildID, dgs.ConnectCode, req)
 		if mdsc == nil {
 			log.Println("Nil response from modifyUsers, probably not good...")
-		} else {
-			go RecordDiscordRequestsByCounts(bot.RedisInterface.client, mdsc)
 		}
 	}
 }
 
 // handleTrackedMembers moves/mutes players according to the current game state
-func (bot *Bot) handleTrackedMembers(sess *discordgo.Session, sett *storage.GuildSettings, delay int, handlePriority HandlePriority, gsr GameStateRequest) {
+func (bot *Bot) handleTrackedMembers(galactus *galactus_client.GalactusClient, sett *settings.GuildSettings, delay int, handlePriority HandlePriority, gsr GameStateRequest) {
 
 	lock, dgs := bot.RedisInterface.GetDiscordGameStateAndLock(gsr)
 	for lock == nil {
 		lock, dgs = bot.RedisInterface.GetDiscordGameStateAndLock(gsr)
 	}
 
-	g, err := sess.State.Guild(dgs.GuildID)
-
+	g, err := galactus.GetGuild(dgs.GuildID)
 	if err != nil || g == nil {
-		lock.Release(ctx)
+		lock.Unlock()
 		return
 	}
 
-	users := []task.UserModify{}
+	users := []discord.UserModify{}
 
 	priorityRequests := 0
 	for _, voiceState := range g.VoiceStates {
@@ -117,7 +119,7 @@ func (bot *Bot) handleTrackedMembers(sess *discordgo.Session, sett *storage.Guil
 		if err != nil {
 			// the User doesn't exist in our userdata cache; add them
 			added := false
-			userData, added = dgs.checkCacheAndAddUser(g, sess, voiceState.UserID)
+			userData, added = dgs.checkCacheAndAddUser(g, bot.GalactusClient, voiceState.UserID)
 			if !added {
 				continue
 			}
@@ -150,14 +152,14 @@ func (bot *Bot) handleTrackedMembers(sess *discordgo.Session, sett *storage.Guil
 		// check the userdata is linked here to not accidentally undeafen music bots, for example
 		if incorrectMuteDeafenState && (found || sett.GetMuteSpectator()) {
 			uid, _ := strconv.ParseUint(userData.User.UserID, 10, 64)
-			userModify := task.UserModify{
+			userModify := discord.UserModify{
 				UserID: uid,
 				Mute:   shouldMute,
 				Deaf:   shouldDeaf,
 			}
 
 			if handlePriority != NoPriority && ((handlePriority == AlivePriority && isAlive) || (handlePriority == DeadPriority && !isAlive)) {
-				users = append([]task.UserModify{userModify}, users...)
+				users = append([]discord.UserModify{userModify}, users...)
 				priorityRequests++ // counter of how many elements on the front of the arr should be sent first
 			} else {
 				users = append(users, userModify)
@@ -170,7 +172,11 @@ func (bot *Bot) handleTrackedMembers(sess *discordgo.Session, sett *storage.Guil
 	// we relinquish the lock while we wait
 	bot.RedisInterface.SetDiscordGameState(dgs, lock)
 
-	voiceLock := bot.RedisInterface.LockVoiceChanges(dgs.ConnectCode, time.Second*time.Duration(delay+1))
+	voiceLock, err := bot.RedisInterface.LockVoiceChanges(dgs.ConnectCode)
+	if err != nil || voiceLock == nil {
+		return
+	}
+	defer voiceLock.Unlock()
 
 	if delay > 0 {
 		log.Printf("Sleeping for %d seconds before applying changes to users\n", delay)
@@ -178,43 +184,42 @@ func (bot *Bot) handleTrackedMembers(sess *discordgo.Session, sett *storage.Guil
 	}
 
 	if dgs.Running && len(users) > 0 {
-		prem, _ := bot.PostgresInterface.GetGuildPremiumStatus(dgs.GuildID)
+		premTier := premium.FreeTier
+		premiumRecord, err := bot.GalactusClient.GetGuildPremium(dgs.GuildID)
+		if err == nil && !premium.IsExpired(premiumRecord.Tier, premiumRecord.Days) {
+			premTier = premiumRecord.Tier
+		}
 
 		if priorityRequests > 0 {
-			req := task.UserModifyRequest{
-				Premium: prem,
+			req := discord.UserModifyRequest{
+				Premium: premTier,
 				Users:   users[:priorityRequests],
 			}
-			// no lock; we're not done yet
-			bot.issueMutesAndRecord(dgs.GuildID, dgs.ConnectCode, req, nil)
+			bot.issueMutesAndRecord(dgs.GuildID, dgs.ConnectCode, req)
 			log.Println("Finished issuing high priority mutes")
 			rem := users[priorityRequests:]
 			if len(rem) > 0 {
-				req = task.UserModifyRequest{
-					Premium: prem,
+				req = discord.UserModifyRequest{
+					Premium: premTier,
 					Users:   rem,
 				}
-				bot.issueMutesAndRecord(dgs.GuildID, dgs.ConnectCode, req, voiceLock)
-			} else if voiceLock != nil {
-				voiceLock.Release(context.Background())
+				bot.issueMutesAndRecord(dgs.GuildID, dgs.ConnectCode, req)
 			}
 		} else {
 			// no priority; issue all at once
 			log.Println("Issuing mutes/deafens with no particular priority")
-			req := task.UserModifyRequest{
-				Premium: prem,
+			req := discord.UserModifyRequest{
+				Premium: premTier,
 				Users:   users,
 			}
-			bot.issueMutesAndRecord(dgs.GuildID, dgs.ConnectCode, req, voiceLock)
+			bot.issueMutesAndRecord(dgs.GuildID, dgs.ConnectCode, req)
 		}
 	}
 }
 
-func (bot *Bot) issueMutesAndRecord(guildID, connectCode string, req task.UserModifyRequest, lock *redislock.Lock) {
-	mdsc := bot.GalactusClient.ModifyUsers(guildID, connectCode, req, lock)
+func (bot *Bot) issueMutesAndRecord(guildID, connectCode string, req discord.UserModifyRequest) {
+	mdsc := bot.GalactusClient.ModifyUsers(guildID, connectCode, req)
 	if mdsc == nil {
 		log.Println("Nil response from modifyUsers, probably not good...")
-	} else {
-		go RecordDiscordRequestsByCounts(bot.RedisInterface.client, mdsc)
 	}
 }

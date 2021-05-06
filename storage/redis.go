@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/alicebob/miniredis/v2"
 	"github.com/automuteus/utils/pkg/rediskey"
+	"github.com/automuteus/utils/pkg/settings"
 	"github.com/go-redis/redis/v8"
 	"log"
 )
@@ -12,7 +14,8 @@ import (
 var ctx = context.Background()
 
 type StorageInterface struct {
-	client *redis.Client
+	client        *redis.Client
+	defaultPrefix string
 }
 
 type RedisParameters struct {
@@ -21,7 +24,18 @@ type RedisParameters struct {
 	Password string
 }
 
-func (storageInterface *StorageInterface) Init(params interface{}) error {
+func (storageInterface *StorageInterface) InitMock() {
+	mr, err := miniredis.Run()
+	if err != nil {
+		panic(err)
+	}
+
+	storageInterface.client = redis.NewClient(&redis.Options{
+		Addr: mr.Addr(),
+	})
+}
+
+func (storageInterface *StorageInterface) Init(prefix string, params interface{}) error {
 	redisParams := params.(RedisParameters)
 	rdb := redis.NewClient(&redis.Options{
 		Addr:     redisParams.Addr,
@@ -30,20 +44,25 @@ func (storageInterface *StorageInterface) Init(params interface{}) error {
 		DB:       0, // use default DB
 	})
 	storageInterface.client = rdb
+	storageInterface.defaultPrefix = prefix
 	return nil
 }
 
-func (storageInterface *StorageInterface) GetGuildSettings(guildID string) *GuildSettings {
-	key := rediskey.GuildSettings(string(HashGuildID(guildID)))
+func (storageInterface *StorageInterface) NewGuildSettings() *settings.GuildSettings {
+	return settings.MakeGuildSettings(storageInterface.defaultPrefix)
+}
+
+func (storageInterface *StorageInterface) GetGuildSettings(guildID string) *settings.GuildSettings {
+	key := rediskey.GuildSettings(rediskey.HashGuildID(guildID))
 
 	j, err := storageInterface.client.Get(ctx, key).Result()
 	switch {
 	case errors.Is(err, redis.Nil):
-		s := MakeGuildSettings()
+		s := settings.MakeGuildSettings(storageInterface.defaultPrefix)
 		jBytes, err := json.MarshalIndent(s, "", "  ")
 		if err != nil {
 			log.Println(err)
-			return MakeGuildSettings()
+			return settings.MakeGuildSettings(storageInterface.defaultPrefix)
 		}
 		err = storageInterface.client.Set(ctx, key, jBytes, 0).Err()
 		if err != nil {
@@ -52,20 +71,20 @@ func (storageInterface *StorageInterface) GetGuildSettings(guildID string) *Guil
 		return s
 	case err != nil:
 		log.Println(err)
-		return MakeGuildSettings()
+		return settings.MakeGuildSettings(storageInterface.defaultPrefix)
 	default:
-		s := GuildSettings{}
+		s := settings.GuildSettings{}
 		err := json.Unmarshal([]byte(j), &s)
 		if err != nil {
 			log.Println(err)
-			return MakeGuildSettings()
+			return settings.MakeGuildSettings(storageInterface.defaultPrefix)
 		}
 		return &s
 	}
 }
 
-func (storageInterface *StorageInterface) SetGuildSettings(guildID string, guildSettings *GuildSettings) error {
-	key := rediskey.GuildSettings(string(HashGuildID(guildID)))
+func (storageInterface *StorageInterface) SetGuildSettings(guildID string, guildSettings *settings.GuildSettings) error {
+	key := rediskey.GuildSettings(rediskey.HashGuildID(guildID))
 
 	jbytes, err := json.MarshalIndent(guildSettings, "", "  ")
 	if err != nil {
@@ -76,7 +95,7 @@ func (storageInterface *StorageInterface) SetGuildSettings(guildID string, guild
 }
 
 func (storageInterface *StorageInterface) DeleteGuildSettings(guildID string) error {
-	key := rediskey.GuildSettings(string(HashGuildID(guildID)))
+	key := rediskey.GuildSettings(rediskey.HashGuildID(guildID))
 
 	err := storageInterface.client.Del(ctx, key).Err()
 	return err

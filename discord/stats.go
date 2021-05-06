@@ -9,19 +9,19 @@ import (
 	"strings"
 
 	"github.com/automuteus/utils/pkg/game"
-	"github.com/automuteus/utils/pkg/premium"
 	"github.com/automuteus/utils/pkg/rediskey"
+	"github.com/automuteus/utils/pkg/settings"
 	"github.com/bwmarrin/discordgo"
 	"github.com/denverquane/amongusdiscord/storage"
 	"github.com/nicksnyder/go-i18n/v2/i18n"
 )
 
-func (bot *Bot) UserStatsEmbed(userID, guildID string, sett *storage.GuildSettings, prem premium.Tier) *discordgo.MessageEmbed {
+func (bot *Bot) UserStatsEmbed(userID, guildID string, sett *settings.GuildSettings, isPrem bool) *discordgo.MessageEmbed {
 	gamesPlayed := bot.PostgresInterface.NumGamesPlayedByUserOnServer(userID, guildID)
 	wins := bot.PostgresInterface.NumWinsOnServer(userID, guildID)
 
 	avatarURL := ""
-	mem, err := bot.PrimarySession.GuildMember(guildID, userID)
+	mem, err := bot.GalactusClient.GetGuildMember(guildID, userID)
 	if err != nil {
 		log.Println(err)
 	} else if mem.User != nil {
@@ -65,7 +65,7 @@ func (bot *Bot) UserStatsEmbed(userID, guildID string, sett *storage.GuildSettin
 		"CommandPrefix": sett.CommandPrefix,
 	})
 
-	if prem != premium.FreeTier {
+	if isPrem {
 		leaderBoardSize := sett.GetLeaderboardSize()
 		extraDesc = ""
 		//extraDesc = sett.LocalizeMessage(&i18n.Message{
@@ -502,7 +502,7 @@ func (bot *Bot) UserStatsEmbed(userID, guildID string, sett *storage.GuildSettin
 func (bot *Bot) CheckOrFetchCachedUserData(userID, guildID string) (string, string, string) {
 	info := rediskey.GetCachedUserInfo(context.Background(), bot.RedisInterface.client, userID, guildID)
 	if info == "" {
-		mem, err := bot.PrimarySession.GuildMember(guildID, userID)
+		mem, err := bot.GalactusClient.GetGuildMember(guildID, userID)
 		if err != nil {
 			log.Println(err)
 			return "", "", ""
@@ -524,7 +524,7 @@ func (bot *Bot) CheckOrFetchCachedUserData(userID, guildID string) (string, stri
 	return split[0], split[1], split[2]
 }
 
-func (bot *Bot) MentionWithCacheData(userID, guildID string, sett *storage.GuildSettings) string {
+func (bot *Bot) MentionWithCacheData(userID, guildID string, sett *settings.GuildSettings) string {
 	if !sett.LeaderboardMention {
 		userName, nickname, _ := bot.CheckOrFetchCachedUserData(userID, guildID)
 		if nickname != "" {
@@ -537,10 +537,10 @@ func (bot *Bot) MentionWithCacheData(userID, guildID string, sett *storage.Guild
 	return "<@" + userID + ">"
 }
 
-func (bot *Bot) GuildStatsEmbed(guildID string, sett *storage.GuildSettings, prem premium.Tier) *discordgo.MessageEmbed {
+func (bot *Bot) GuildStatsEmbed(guildID string, sett *settings.GuildSettings, isPrem bool) *discordgo.MessageEmbed {
 	gname := ""
 	avatarURL := ""
-	g, err := bot.PrimarySession.Guild(guildID)
+	g, err := bot.GalactusClient.GetGuild(guildID)
 
 	if err != nil {
 		log.Println(err)
@@ -591,7 +591,7 @@ func (bot *Bot) GuildStatsEmbed(guildID string, sett *storage.GuildSettings, pre
 		"CommandPrefix": sett.CommandPrefix,
 	})
 
-	if prem != premium.FreeTier {
+	if isPrem {
 		leaderboardSize := sett.GetLeaderboardSize()
 		leaderboardMin := sett.GetLeaderboardMin()
 		extraDesc = ""
@@ -894,7 +894,7 @@ func (bot *Bot) GuildStatsEmbed(guildID string, sett *storage.GuildSettings, pre
 	return &embed
 }
 
-func (bot *Bot) GameStatsEmbed(guildID, matchID, connectCode string, sett *storage.GuildSettings, prem premium.Tier) *discordgo.MessageEmbed {
+func (bot *Bot) GameStatsEmbed(guildID, matchID, connectCode string, sett *settings.GuildSettings, isPrem bool) *discordgo.MessageEmbed {
 	gameData, err := bot.PostgresInterface.GetGame(guildID, connectCode, matchID)
 	if err != nil {
 		log.Fatal(err)
